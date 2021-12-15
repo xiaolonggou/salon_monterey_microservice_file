@@ -2,75 +2,90 @@ package main
 
 import (
 	"context"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"time"
 
-	"github.com/go-openapi/runtime/middleware"
-	gohandlers "github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
-	"github.com/hashicorp/go-hclog"
-	"github.com/xiaolonggou/microservice/v1/data"
+	hclog "github.com/hashicorp/go-hclog"
+	"github.com/nicholasjackson/env"
+	"github.com/xiaolonggou/microservice/v1/files"
 	"github.com/xiaolonggou/microservice/v1/handlers"
 )
 
+var bindAddress = env.String("BIND_ADDRESS", false, ":9090", "Bind address for the server")
+var logLevel = env.String("LOG_LEVEL", false, "debug", "Log output level for the server [debug, info, trace]")
+var basePath = env.String("BASE_PATH", false, "./imagestore", "Base path to save images")
+
 func main() {
-	l := hclog.Default()
-	v := data.NewValidation()
-	aph := handlers.NewArtPiece(l, v)
-	sm := mux.NewRouter()
+	env.Parse()
 
-	getRouter := sm.Methods(http.MethodGet).Subrouter()
-	getRouter.HandleFunc("/arts", aph.GetArtPieces)
+	l := hclog.New(
+		&hclog.LoggerOptions{
+			Name:  "arts-images",
+			Level: hclog.LevelFromString(*logLevel),
+		},
+	)
 
-	putRouter := sm.Methods(http.MethodPut).Subrouter()
-	putRouter.HandleFunc("/arts", aph.Update)
-	putRouter.Use(aph.MiddlewareArtPieceValidation)
-
-	postRouter := sm.Methods(http.MethodPost).Subrouter()
-	postRouter.HandleFunc("/arts", aph.Create)
-	postRouter.Use(aph.MiddlewareArtPieceValidation)
-
-	deleteRouter := sm.Methods(http.MethodDelete).Subrouter()
-	deleteRouter.HandleFunc("/arts/{id:[0-9]+}", aph.DeleteArtPiece)
-
-	opts := middleware.RedocOpts{SpecURL: "/swagger.yaml"}
-	sh := middleware.Redoc(opts, nil)
-
-	getRouter.Handle("/docs", sh)
-	getRouter.Handle("/swagger.yaml", http.FileServer(http.Dir("./")))
-
-	getRouter.Handle("/docs", sh)
-	//CORS
-	ch := gohandlers.CORS(gohandlers.AllowedOrigins([]string{"http://localhost:3000"}))
-
-	s := &http.Server{
-		Addr:         ":9090",
-		Handler:      ch(sm),
-		IdleTimeout:  120 * time.Second,
-		ReadTimeout:  1 * time.Second,
-		WriteTimeout: 1 * time.Second,
+	sl := l.StandardLogger(&hclog.StandardLoggerOptions{InferLevels: true})
+	// create the storage class, use local storage
+	// max filesize 5MB
+	stor, err := files.NewLocal(*basePath, 1024*1000*5)
+	if err != nil {
+		l.Error("Unable to create storage", "error", err)
+		os.Exit(1)
 	}
 
-	go func() {
-		l.Info("server starting...")
-		l.Debug("serving HTTP...")
-		err := s.ListenAndServe()
+	// create the handlers
+	fh := handlers.NewFiles(stor, l)
 
+	// create a new serve mux and register the handlers
+	sm := mux.NewRouter()
+
+	// filename regex: {filename:[a-zA-Z]+\\.[a-z]{3}}
+	// problem with FileServer is that it is dumb
+	ph := sm.Methods(http.MethodPost).Subrouter()
+	ph.HandleFunc("/images/{id:[0-9]+}/{filename:[a-zA-Z]+\\.[a-z]{3}}", fh.ServeHTTP)
+
+	// get files
+	gh := sm.Methods(http.MethodGet).Subrouter()
+	gh.Handle(
+		"/images/{id:[0-9]+}/{filename:[a-zA-Z]+\\.[a-z]{3}}",
+		http.StripPrefix("/images/", http.FileServer(http.Dir(*basePath))),
+	)
+
+	// create a new server
+	s := http.Server{
+		Addr:         *bindAddress,      // configure the bind address
+		Handler:      sm,                // set the default handler
+		ErrorLog:     sl,                // the logger for the server
+		ReadTimeout:  5 * time.Second,   // max time to read request from the client
+		WriteTimeout: 10 * time.Second,  // max time to write response to the client
+		IdleTimeout:  120 * time.Second, // max time for connections using TCP Keep-Alive
+	}
+
+	// start the server
+	go func() {
+		l.Info("Starting server", "bind_address", *bindAddress)
+
+		err := s.ListenAndServe()
 		if err != nil {
-			l.Error("Error starting server", "error", err)
+			l.Error("Unable to start server", "error", err)
 			os.Exit(1)
 		}
 	}()
 
-	sigChan := make(chan os.Signal)
-	signal.Notify(sigChan, os.Interrupt)
-	signal.Notify(sigChan, os.Kill)
+	// trap sigterm or interupt and gracefully shutdown the server
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt)
+	signal.Notify(c, os.Kill)
 
-	sig := <-sigChan
-	log.Println("Got signal:", sig)
-	tc, _ := context.WithTimeout(context.Background(), 30*time.Second)
-	s.Shutdown(tc)
+	// Block until a signal is received.
+	sig := <-c
+	l.Info("Shutting down server with", "signal", sig)
+
+	// gracefully shutdown the server, waiting max 30 seconds for current operations to complete
+	ctx, _ := context.WithTimeout(context.Background(), 30*time.Second)
+	s.Shutdown(ctx)
 }
