@@ -3,6 +3,7 @@ module github.com/xiaolonggou/microservice/v1
 go 1.17
 
 require (
+	github.com/gorilla/handlers v1.4.2
 	github.com/gorilla/mux v1.8.0
 	github.com/hashicorp/go-hclog v1.0.0
 	github.com/nicholasjackson/building-microservices-youtube/product-images v0.0.0-20211011132451-0cd586295712
