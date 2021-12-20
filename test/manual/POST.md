@@ -1,0 +1,1 @@
+PS C:\Users\D058009\lawrence\salon_monterey_microservice_file> curl.exe -XPOST localhost:9090/images/1/test.png --data-binary "@test.png" 

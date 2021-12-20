@@ -19,6 +19,7 @@ var logLevel = env.String("LOG_LEVEL", false, "debug", "Log output level for the
 var basePath = env.String("BASE_PATH", false, "./imagestore", "Base path to save images")
 
 func main() {
+
 	env.Parse()
 
 	l := hclog.New(
